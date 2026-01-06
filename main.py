@@ -1,88 +1,82 @@
+import os
 import json
 import polars as pl
+import pandas as pd
 import pathway as pw
-pw.set_license_key('12403C-5891EB-94B6EC-CC90D1-C3B479-V3')
-from pathway.xpacks.llm.embedders import OpenAIEmbedder
+from pathway.xpacks.llm.embedders import LiteLLMEmbedder
 from pathway.xpacks.llm.parsers import UnstructuredParser
 from pathway.xpacks.llm.splitters import TokenCountSplitter
 from pathway.stdlib.indexing.nearest_neighbors import BruteForceKnnFactory
 from pathway.xpacks.llm.document_store import DocumentStore
-from pathway.xpacks.llm.mcp_server import PathwayMcp
 
 from agno.agent import Agent
 from agno.workflow import Workflow, Step, Parallel
 from agno.tools.reasoning import ReasoningTools
 from agno.models.message import Message
-from agno.tools import Tool
-
-from fastmcp import Client
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from agno.tools import Toolkit
 
 # ==================== CONFIG ====================
 GDRIVE_FOLDER_ID = "1Z1Pt3XoF7GAb_QtLksa8q4D_U-wc65e4"
-MCP_URL = "http://localhost:8123/mcp/"
+pw.set_license_key("12403C-5891EB-94B6EC-CC90D1-C3B479-V3")
+os.environ['MISTRAL_API_KEY'] = "QVIVwZhP01i2QlrDtQ7U6QU6hFyst4yy"
 
-# ==================== PATHWAY MCP SERVER ====================
-def launch_mcp_server():
-    docs = pw.io.gdrive.read(
-        object_id=GDRIVE_FOLDER_ID,
-        mode="static",
-        format="plaintext",
-        with_metadata=True
-    )
+# ==================== DOCUMENT STORE SETUP ====================
+# Using local file system instead of Google Drive to avoid credential issues
+docs = pw.io.fs.read(
+    path="./novels/Books",
+    mode="static",
+    format="binary",
+    with_metadata=True
+)
 
-    parser = UnstructuredParser(chunking_mode="basic")
-    splitter = TokenCountSplitter(min_tokens=400, max_tokens=1600, encoding_name="cl100k_base")
-    embedder = OpenAIEmbedder(model="text-embedding-ada-002")
-    retriever = BruteForceKnnFactory(embedder=embedder, k=8)
+parser = UnstructuredParser(chunking_mode="basic")
+splitter = TokenCountSplitter(min_tokens=400, max_tokens=1600, encoding_name="cl100k_base")
+embedder = LiteLLMEmbedder(model="mistral/mistral-embed")
+retriever = BruteForceKnnFactory(embedder=embedder)
 
-    store = DocumentStore(
-        docs=docs,
-        parser=parser,
-        splitter=splitter,
-        retriever_factory=retriever
-    )
+store = DocumentStore(
+    docs=docs,
+    parser=parser,
+    splitter=splitter,
+    retriever_factory=retriever
+)
 
-    PathwayMcp(
-        name="KDSH26_Novel_Store",
-        transport="streamable-http",
-        host="localhost",
-        port=8123,
-        serve=[store]
-    )
-    pw.run()  # Blocks
+# ==================== DIRECT RETRIEVAL TOOL ====================
+class NovelRAG(Toolkit):
+    def __init__(self, store):
+        self.store = store
+        # Register tools in constructor
+        super().__init__(name="novel_rag", tools=[self.retrieve_novel_passages])
+    
+    def retrieve_novel_passages(self, query: str, book_name: str) -> str:
+        """Retrieve relevant passages from the full novel directly.
+        
+        Args:
+            query: The query to retrieve passages for.
+            book_name: The name of the book to retrieve passages from.
+        """
+        metadata_filter = {"name": {"$regex": f".*{book_name.replace(' ', '_')}.*"}}
+        query_row = {"query": query, "k": 8, "metadata_filter": json.dumps(metadata_filter)}
+        query_df = pd.DataFrame([query_row])
+        query_table = pw.debug.table_from_pandas(query_df)
+        
+        retrieved = self.store.retrieve_query(query_table)
+        
+        # Compute results
+        results = pw.debug.compute_and_print(retrieved.select(pw.this.result))
+        
+        passages = []
+        if results:
+            for doc in results[0]["result"]:
+                passages.append(doc["text"])
+        
+        return "\n\n---\n\n".join(passages) or "No relevant passages."
 
-# Start server in background
-ThreadPoolExecutor(max_workers=1).submit(launch_mcp_server)
-
-# ==================== MCP RETRIEVAL TOOL ====================
-class NovelRAG(Tool):
-    name = "retrieve_novel_passages"
-    description = "Retrieve relevant passages from the full novel."
-
-    def __init__(self):
-        self.client = Client(MCP_URL)
-
-    async def _call(self, query: str, book_name: str):
-        async with self.client:
-            args = {
-                "query": query,
-                "k": 8,
-                "metadata_filter": {"name": {"$regex": f".*{book_name.replace(' ', '_')}.*"}}
-            }
-            result = await self.client.call_tool("retrieve_query", args)
-        passages = result.get("result", [])
-        return "\n\n---\n\n".join([p["text"] for p in passages]) or "No relevant passages."
-
-    def __call__(self, query: str, book_name: str):
-        return asyncio.run(self._call(query, book_name))
-
-rag_tool = NovelRAG()
+rag_tool = NovelRAG(store)
 
 # ==================== DATA LOADING (Polars) ====================
-train_df = pl.read_csv("train.csv")
-test_df = pl.read_csv("test.csv")
+train_df = pl.read_csv("novels/train.csv")
+test_df = pl.read_csv("novels/test.csv")
 
 def build_few_shot() -> list[Message]:
     consistent = train_df.filter(pl.col("label") == "consistent").sample(3)
@@ -219,3 +213,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Run Pathway engine
+pw.run()

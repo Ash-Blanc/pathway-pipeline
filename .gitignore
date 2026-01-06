@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+novels/
+config.bat
+node_modules

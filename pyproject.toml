@@ -1,0 +1,13 @@
+[project]
+name = "pathway-pipeline"
+version = "0.1.0"
+description = "just another novelty"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "agno>=2.3.21",
+    "fastmcp>=2.14.2",
+    "mistralai>=1.9.11",
+    "pathway[all,xpack-llm]>=0.2.0",
+    "polars>=1.36.1",
+]
